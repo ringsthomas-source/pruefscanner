@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Code scannen – Prüfmanager</title>
+<style>
+html,body{margin:0;height:100%;background:#0d1110;color:#fff;font:16px system-ui,-apple-system,"Segoe UI",sans-serif;overflow:hidden}
+#v{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;background:#000}
+#frame{position:fixed;left:7%;right:7%;top:32%;height:28%;border:3px solid rgba(255,255,255,.95);border-radius:14px;box-shadow:0 0 0 9999px rgba(0,0,0,.42);transition:border-color .2s}
+#frame.hit{border-color:#3ddc84}
+#line{position:absolute;left:5%;right:5%;top:50%;height:2px;background:#ff5a4f;box-shadow:0 0 8px #ff5a4f;animation:pulse 1.4s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.35}}
+#msg{position:fixed;top:0;left:0;right:0;padding:calc(14px + env(safe-area-inset-top)) 16px 14px;text-align:center;background:rgba(0,0,0,.55);font-weight:500}
+#msg.ok{background:#1d7a46}
+#msg.err{background:#b3261e}
+#bar{position:fixed;left:0;right:0;bottom:0;padding:14px 14px calc(14px + env(safe-area-inset-bottom));display:flex;gap:10px;justify-content:center;flex-wrap:wrap;background:rgba(0,0,0,.6)}
+.b{background:#fff;color:#111;border:none;border-radius:10px;padding:12px 16px;font:600 15px system-ui,sans-serif;cursor:pointer;display:inline-flex;align-items:center;gap:6px}
+.b.on{background:#ffd54a}
+#zoomwrap{position:fixed;left:12%;right:12%;top:calc(60% + 18px);display:none;align-items:center;gap:10px;font-size:13px}
+#zoomwrap input{flex:1}
+#res{font:600 22px ui-monospace,monospace;margin-top:6px;word-break:break-all}
+</style>
+</head>
+<body>
+<video id="v" playsinline muted autoplay></video>
+<div id="frame"><div id="line"></div></div>
+<div id="zoomwrap">Zoom <input type="range" id="zoom" min="1" max="1" step="0.1" value="1"></div>
+<div id="msg">Kamera wird gestartet …</div>
+<div id="bar">
+  <button class="b" id="torch" hidden>Licht</button>
+  <label class="b">Foto aufnehmen<input type="file" accept="image/&#42;" capture="environment" id="file" hidden></label>
+  <button class="b" id="close">Abbrechen</button>
+</div>
+<script>
+"use strict";
+var msg=document.getElementById("msg"), v=document.getElementById("v"), frame=document.getElementById("frame");
+var stream=null, track=null, detector=null, busy=false, done=false, last={text:"",n:0,t:0}, tick=0;
+function say(t,cls){ msg.className=cls||""; msg.innerHTML=t; }
+function send(obj){ try{ if(window.opener){ window.opener.postMessage(obj,"*"); return true; } }catch(e){} return false; }
+function stop(){ try{ if(stream) stream.getTracks().forEach(function(t){ t.stop(); }); }catch(e){} }
+function finish(text){
+  if(done) return; done=true; frame.className="hit";
+  try{ if(navigator.vibrate) navigator.vibrate(90); }catch(e){}
+  var ok=send({type:"pm-scan",text:text});
+  say("Erkannt:<div id=res></div>"+(ok?"":"<div style='font-size:14px;margin-top:6px'>Bitte den Code oben abtippen – die App ist nicht mehr verbunden.</div>"),"ok");
+  document.getElementById("res").textContent=text;
+  stop(); if(ok) setTimeout(function(){ window.close(); },700);
+}
+function loadScript(urls){ return new Promise(function(res){ var i=0; (function next(){ if(i>=urls.length) return res(false); var s=document.createElement("script"); s.src=urls[i++]; s.async=true; s.onload=function(){ res(true); }; s.onerror=function(){ s.remove(); next(); }; document.head.appendChild(s); })(); }); }
+var zbarReady=loadScript(["https://cdn.jsdelivr.net/npm/@undecaf/zbar-wasm@0.11.0/dist/inlined/index.js","https://unpkg.com/@undecaf/zbar-wasm@0.11.0/dist/inlined/index.js"]);
+var zxReady=loadScript(["https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js","https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js"]);
+var zxReader=null;
+function zx(){ if(zxReader||!window.ZXing) return zxReader; var Z=window.ZXing; zxReader=new Z.MultiFormatReader(); var h=new Map(); h.set(Z.DecodeHintType.TRY_HARDER,true);
+  h.set(Z.DecodeHintType.POSSIBLE_FORMATS,[Z.BarcodeFormat.QR_CODE,Z.BarcodeFormat.DATA_MATRIX,Z.BarcodeFormat.CODE_128,Z.BarcodeFormat.CODE_39,Z.BarcodeFormat.CODE_93,Z.BarcodeFormat.EAN_13,Z.BarcodeFormat.EAN_8,Z.BarcodeFormat.UPC_A,Z.BarcodeFormat.UPC_E,Z.BarcodeFormat.ITF,Z.BarcodeFormat.CODABAR]);
+  zxReader.setHints(h); return zxReader; }
+var cv=document.createElement("canvas"), cx=cv.getContext("2d",{willReadFrequently:true});
+function grab(full){
+  var W=v.videoWidth, H=v.videoHeight; if(!W||!H) return null;
+  var sx=0, sy=0, sw=W, sh=H;
+  if(!full){ sw=W*0.88; sh=H*0.55; sx=(W-sw)/2; sy=(H-sh)/2; }
+  var sc=Math.min(1,1280/sw); cv.width=Math.round(sw*sc); cv.height=Math.round(sh*sc);
+  cx.drawImage(v,sx,sy,sw,sh,0,0,cv.width,cv.height); return cv;
+}
+function isMatrix(fmt){ return /qr|matrix|aztec|pdf/i.test(String(fmt||"")); }
+function accept(text,fmt){
+  if(!text) return;
+  text=String(text).trim(); if(!text) return;
+  var now=Date.now();
+  if(isMatrix(fmt)) return finish(text);
+  if(last.text===text && now-last.t<2000){ last.n++; } else { last={text:text,n:1,t:now}; }
+  last.t=now;
+  if(last.n>=2) finish(text); else say("Lese … bitte ruhig halten","");
+}
+async function scanOnce(){
+  if(busy||done||v.readyState<2) return; busy=true; tick++;
+  try{
+    var c=grab(tick%4===0);
+    if(c){
+      if(detector){ var r=await detector.detect(c); if(r&&r.length){ accept(r[0].rawValue,r[0].format); busy=false; return; } }
+      if(window.zbarWasm && tick%2===0){ var id=cx.getImageData(0,0,c.width,c.height); var s=await window.zbarWasm.scanImageData(id); if(s&&s.length){ accept(s[0].decode(),s[0].typeName); busy=false; return; } }
+      var R=zx(); if(R && tick%2===1){ var Z=window.ZXing; try{ var res=R.decodeWithState(new Z.BinaryBitmap(new Z.HybridBinarizer(new Z.HTMLCanvasElementLuminanceSource(c)))); if(res) accept(res.getText(),Z.BarcodeFormat[res.getBarcodeFormat()]); }catch(e){} }
+    }
+  }catch(e){}
+  busy=false;
+}
+async function start(){
+  if("BarcodeDetector" in window){ try{ var f=await BarcodeDetector.getSupportedFormats(); if(f&&f.length) detector=new BarcodeDetector({formats:f}); }catch(e){ detector=null; } }
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){ say("Live-Kamera wird von diesem Browser nicht unterstützt. Bitte „Foto aufnehmen“ verwenden.","err"); return; }
+  try{
+    stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:"environment"},width:{ideal:1920},height:{ideal:1080}}});
+  }catch(e){
+    say("Kein Zugriff auf die Kamera ("+(e&&e.name||"Fehler")+"). Bitte den Kamerazugriff erlauben – oder „Foto aufnehmen“ verwenden.","err"); return;
+  }
+  v.srcObject=stream; try{ await v.play(); }catch(e){}
+  track=stream.getVideoTracks()[0];
+  try{
+    var caps=track.getCapabilities?track.getCapabilities():{};
+    if(caps.focusMode&&caps.focusMode.indexOf("continuous")>=0) await track.applyConstraints({advanced:[{focusMode:"continuous"}]});
+    if(caps.torch){ var tb=document.getElementById("torch"); tb.hidden=false; var on=false; tb.onclick=async function(){ on=!on; try{ await track.applyConstraints({advanced:[{torch:on}]}); tb.className="b"+(on?" on":""); }catch(e){} }; }
+    if(caps.zoom&&caps.zoom.max>caps.zoom.min){ var z=document.getElementById("zoom"); z.min=caps.zoom.min; z.max=Math.min(caps.zoom.max,8); z.step=caps.zoom.step||0.1; z.value=caps.zoom.min; document.getElementById("zoomwrap").style.display="flex"; z.oninput=function(){ track.applyConstraints({advanced:[{zoom:Number(z.value)}]}).catch(function(){}); }; }
+  }catch(e){}
+  say("Barcode oder QR-Code in den Rahmen halten …");
+  setInterval(scanOnce,110);
+  setTimeout(function(){ if(!done) say("Noch nichts erkannt: etwas weiter weg halten (scharf stellen), Code waagerecht ausrichten, bei Spiegelung leicht schräg halten."); },9000);
+}
+document.getElementById("close").onclick=function(){ stop(); send({type:"pm-scan-cancel"}); window.close(); };
+document.getElementById("file").onchange=function(e){ var f=e.target.files&&e.target.files[0]; if(!f) return; stop(); if(send({type:"pm-photo",file:f})){ say("Foto wird in der App ausgewertet …","ok"); setTimeout(function(){ window.close(); },400); } else say("Die App ist nicht mehr verbunden.","err"); };
+window.addEventListener("pagehide",stop);
+start();
+</script>
+</body>
+</html>
