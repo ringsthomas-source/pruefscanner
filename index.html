@@ -37,15 +37,25 @@ html,body{margin:0;height:100%;background:#0d1110;color:#fff;font:16px system-ui
 var msg=document.getElementById("msg"), v=document.getElementById("v"), frame=document.getElementById("frame");
 var stream=null, track=null, detector=null, busy=false, done=false, last={text:"",n:0,t:0}, tick=0;
 function say(t,cls){ msg.className=cls||""; msg.innerHTML=t; }
-function send(obj){ try{ if(window.opener){ window.opener.postMessage(obj,"*"); return true; } }catch(e){} return false; }
+var RET=(function(){ var m=location.hash.match(/ret=([^&]+)/); try{ return m?decodeURIComponent(m[1]):""; }catch(e){ return ""; } })();
+if(RET && !/^https:[\/][\/]script[.]google[.]com[\/]/i.test(RET)) RET="";
+function withParam(url,k,v){ var h=url.indexOf("#"); var base=h>=0?url.slice(0,h):url; return base+(base.indexOf("?")>=0?"&":"?")+k+"="+encodeURIComponent(v); }
+function send(obj){
+  try{ if(window.opener && !window.opener.closed){ window.opener.postMessage(obj,"*"); return true; } }catch(e){}
+  if(RET){
+    if(obj.type==="pm-scan"){ setTimeout(function(){ location.replace(withParam(RET,"scan",obj.text)); },600); return "nav"; }
+    if(obj.type==="pm-scan-cancel"){ location.replace(withParam(RET,"scancancel","1")); return "nav"; }
+  }
+  return false;
+}
 function stop(){ try{ if(stream) stream.getTracks().forEach(function(t){ t.stop(); }); }catch(e){} }
 function finish(text){
   if(done) return; done=true; frame.className="hit";
   try{ if(navigator.vibrate) navigator.vibrate(90); }catch(e){}
   var ok=send({type:"pm-scan",text:text});
-  say("Erkannt:<div id=res></div>"+(ok?"":"<div style='font-size:14px;margin-top:6px'>Bitte den Code oben abtippen – die App ist nicht mehr verbunden.</div>"),"ok");
+  say("Erkannt:<div id=res></div>"+(ok==="nav"?"<div style='font-size:14px;margin-top:6px'>Zurück zur App …</div>":ok?"":"<div style='font-size:14px;margin-top:6px'>Bitte den Code oben abtippen – die App ist nicht mehr verbunden.</div>"),"ok");
   document.getElementById("res").textContent=text;
-  stop(); if(ok) setTimeout(function(){ window.close(); },700);
+  stop(); if(ok===true) setTimeout(function(){ window.close(); },700);
 }
 function loadScript(urls){ return new Promise(function(res){ var i=0; (function next(){ if(i>=urls.length) return res(false); var s=document.createElement("script"); s.src=urls[i++]; s.async=true; s.onload=function(){ res(true); }; s.onerror=function(){ s.remove(); next(); }; document.head.appendChild(s); })(); }); }
 var zbarReady=loadScript(["https://cdn.jsdelivr.net/npm/@undecaf/zbar-wasm@0.11.0/dist/inlined/index.js","https://unpkg.com/@undecaf/zbar-wasm@0.11.0/dist/inlined/index.js"]);
@@ -104,7 +114,8 @@ async function start(){
   setInterval(scanOnce,110);
   setTimeout(function(){ if(!done) say("Noch nichts erkannt: etwas weiter weg halten (scharf stellen), Code waagerecht ausrichten, bei Spiegelung leicht schräg halten."); },9000);
 }
-document.getElementById("close").onclick=function(){ stop(); send({type:"pm-scan-cancel"}); window.close(); };
+document.getElementById("close").onclick=function(){ stop(); var r=send({type:"pm-scan-cancel"}); if(r!=="nav") window.close(); };
+if(RET && !window.opener){ var fl=document.getElementById("file"); if(fl) fl.parentNode.style.display="none"; document.getElementById("close").textContent="Zurück zur App"; }
 document.getElementById("file").onchange=function(e){ var f=e.target.files&&e.target.files[0]; if(!f) return; stop(); if(send({type:"pm-photo",file:f})){ say("Foto wird in der App ausgewertet …","ok"); setTimeout(function(){ window.close(); },400); } else say("Die App ist nicht mehr verbunden.","err"); };
 window.addEventListener("pagehide",stop);
 start();
